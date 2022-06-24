@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 
 	"github.com/gorilla/websocket"
+	uuid "github.com/satori/go.uuid"
 )
 
 // ClientManager monitoring of connected clients, new registrations
@@ -76,6 +79,74 @@ func (manager *ClientManager) start() {
 	}
 }
 
+// send tour each clients
 func (manager *ClientManager) send(message []byte, ignore *Client) {
+	for conn := range manager.clients {
+		if conn != ignore {
+			conn.send <- message
+		}
+	}
+}
 
+// read listen each socket read message and return the message in json format
+func (c *Client) read() {
+	defer func() {
+		manager.unregister <- c
+		c.socket.Close()
+	}()
+
+	for {
+		_, message, err := c.socket.ReadMessage()
+		if err != nil {
+			manager.unregister <- c
+			c.socket.Close()
+			break
+		}
+		jsonMessage, _ := json.Marshal(&Message{Sender: c.id, Content: string(message)})
+		manager.broadcast <- jsonMessage
+	}
+}
+
+// write send data for `c.send` and if the channel is not ok return a disconnection message
+func (c *Client) write() {
+	defer func() {
+		c.socket.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-c.send:
+			if !ok {
+				c.socket.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			c.socket.WriteMessage(websocket.TextMessage, message)
+		}
+	}
+}
+
+func main() {
+	fmt.Println("Starting app...")
+	go manager.start()
+	http.HandleFunc("/ws", wsPage)
+	http.ListenAndServe(":12345", nil)
+}
+
+// wsPage page test
+func wsPage(res http.ResponseWriter, req *http.Request) {
+	conn, err := (&websocket.Upgrader{CheckOrigin: func(r *http.Request) bool {
+		return true
+	}}).Upgrade(res, req, nil)
+
+	if err != nil {
+		http.NotFound(res, req)
+		return
+	}
+
+	client := &Client{id: uuid.NewV4().String(), socket: conn, send: make(chan []byte)}
+
+	manager.register <- client
+
+	go client.read()
+	go client.write()
 }
